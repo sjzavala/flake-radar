@@ -105,25 +105,35 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Downloaded by name into an explicit directory, not by pattern. A pattern matching
+      # one artifact extracts it flat into `path`; a pattern matching several creates a
+      # subdirectory per artifact — so the path you have to read depends on how many jobs
+      # happened to run, and the ingest step silently skips when you guess wrong.
       - uses: actions/download-artifact@v7
         with:
-          pattern: results-*
-          path: results
-          merge-multiple: false
+          name: results-blocking
+          path: results/blocking
+
+      - uses: actions/download-artifact@v7
+        # Absent whenever nothing is quarantined, which is the normal case.
+        continue-on-error: true
+        with:
+          name: results-quarantined
+          path: results/quarantined
 
       # Each job's report is ingested separately, under its own run id, so the two never
       # overwrite one another in the history.
       - uses: sjzavala/flake-radar@v1
-        if: ${{ hashFiles('results/results-blocking/report.json') != '' }}
+        if: ${{ hashFiles('results/blocking/report.json') != '' }}
         with:
-          report: results/results-blocking/report.json
+          report: results/blocking/report.json
           run-id: ${{ github.run_id }}-blocking
           comment: 'true'
           commit: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: sjzavala/flake-radar@v1
-        if: ${{ hashFiles('results/results-quarantined/report.json') != '' }}
+        if: ${{ hashFiles('results/quarantined/report.json') != '' }}
         with:
-          report: results/results-quarantined/report.json
+          report: results/quarantined/report.json
           run-id: ${{ github.run_id }}-quarantined
           commit: ${{ github.ref == 'refs/heads/main' }}
