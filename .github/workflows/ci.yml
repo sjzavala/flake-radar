@@ -125,6 +125,9 @@ jobs:
       # than described. Re-quarantine, backdate the clock, and sweep.
       - name: Re-quarantine and backdate it past the expiry
         run: |
+          # shellcheck disable=SC2016
+          # The single-quoted block below is JavaScript, not shell. `${ids.length}` is a
+          # template literal for node to expand, and must not be expanded by bash.
           set -euo pipefail
           for i in 14 15 16; do
             node scripts/flake-radar.mjs ingest \
