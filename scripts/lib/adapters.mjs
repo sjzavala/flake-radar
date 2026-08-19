@@ -34,7 +34,7 @@ export function fromPlaywrightJson(report, run) {
       const title = [...nextPath, spec.title].filter(Boolean).join(' > ');
 
       for (const test of spec.tests ?? []) {
-        const attempts = (test.results ?? []).map((r) => r.status);
+        const attempts = (test.results ?? []).map((r) => resolveAttempt(r.status, test.expectedStatus));
         const firstError = (test.results ?? []).find((r) => r.error?.message ?? r.error?.value);
         tests.push({
           id: testId({ project: test.projectName, file: specFile, title }),
@@ -140,6 +140,23 @@ export function fromReport(raw, run) {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Score an attempt against what the test said it expected, not against `passed`.
+ *
+ * `test.fail()` marks a spec that is *supposed* to fail — a guard pinned to a known bug,
+ * so that whoever fixes the bug gets a signal. Playwright records those attempts with
+ * `status: "failed"` and `expectedStatus: "failed"`, and reading the status alone would
+ * score a working guard as a permanently broken test.
+ *
+ * The inversion matters in both directions. When such a guard starts *passing*, the bug
+ * has been fixed and the guard is now the thing that is wrong — so that reads as a
+ * failure here, which is exactly the notification the pattern exists to produce.
+ */
+export function resolveAttempt(status, expectedStatus = 'passed') {
+  if (status === 'skipped') return 'skipped';
+  return status === expectedStatus ? 'passed' : 'failed';
+}
 
 function buildRun(run = {}, framework) {
   return {

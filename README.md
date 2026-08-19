@@ -188,7 +188,7 @@ plainly here rather than papered over in a feature matrix.
 
 A tool that decides which tests to stop trusting is the last place to accept "looks right":
 
-- **86 unit tests** over the contract, both adapters, history windowing, scoring, the state
+- **89 unit tests** over the contract, both adapters, history windowing, scoring, the state
   machine and the rendering — weighted toward the negative cases. That a broken test is *never*
   quarantined, that two flaky commits are *not* enough, that a skipped run neither counts as
   clean nor resets the clock, that re-ingesting a run doesn't double-count it.

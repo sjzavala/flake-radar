@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { fromPlaywrightJson, fromJUnitXml, fromReport, detectFormat } from './adapters.mjs';
+import { fromPlaywrightJson, fromJUnitXml, fromReport, detectFormat, resolveAttempt } from './adapters.mjs';
 
 const RUN = { id: '99', attempt: 1, commitSha: 'abc123', branch: 'main' };
 
@@ -77,6 +77,50 @@ test('the Playwright adapter carries the run metadata through', () => {
 test('the Playwright adapter tolerates an empty report', () => {
   assert.deepEqual(fromPlaywrightJson({ suites: [] }, RUN).tests, []);
   assert.deepEqual(fromPlaywrightJson({}, RUN).tests, []);
+});
+
+test('a test.fail() guard doing its job is a pass, not a permanent failure', () => {
+  // Playwright records an expected failure as `status: "failed"` with
+  // `expectedStatus: "failed"`. Reading the status alone would score every guard pinned to
+  // a known bug as a broken test, forever.
+  const report = {
+    suites: [
+      {
+        title: 'tests/guard.spec.js',
+        file: 'tests/guard.spec.js',
+        specs: [
+          {
+            title: 'search is case-insensitive',
+            file: 'tests/guard.spec.js',
+            tests: [
+              {
+                projectName: 'chromium',
+                expectedStatus: 'failed',
+                status: 'expected',
+                results: [{ status: 'failed', duration: 80, error: { message: 'expected 3, received 0' } }],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  assert.deepEqual(fromPlaywrightJson(report, RUN).tests[0].attempts, ['passed']);
+});
+
+test('a guard that starts passing reads as a failure, which is the point of the guard', () => {
+  // The bug got fixed, so the guard is now the thing that is wrong. That has to surface.
+  assert.equal(resolveAttempt('passed', 'failed'), 'failed');
+  assert.equal(resolveAttempt('failed', 'failed'), 'passed');
+});
+
+test('resolveAttempt leaves ordinary tests and skips alone', () => {
+  assert.equal(resolveAttempt('passed', 'passed'), 'passed');
+  assert.equal(resolveAttempt('failed', 'passed'), 'failed');
+  assert.equal(resolveAttempt('timedOut', 'passed'), 'failed');
+  assert.equal(resolveAttempt('skipped', 'passed'), 'skipped');
+  assert.equal(resolveAttempt('skipped', 'failed'), 'skipped', 'a skip is never evidence, whatever was expected');
+  assert.equal(resolveAttempt('passed'), 'passed', 'expectedStatus defaults to passed');
 });
 
 const JUNIT_XML = `<?xml version="1.0" encoding="UTF-8"?>
