@@ -125,25 +125,25 @@ jobs:
       # than described. Re-quarantine, backdate the clock, and sweep.
       - name: Re-quarantine and backdate it past the expiry
         run: |
-          # shellcheck disable=SC2016
-          # The single-quoted block below is JavaScript, not shell. `${ids.length}` is a
-          # template literal for node to expand, and must not be expanded by bash.
           set -euo pipefail
           for i in 14 15 16; do
             node scripts/flake-radar.mjs ingest \
               --report "$FLAKY" --run-id "expiry-$i" --sha "sha-exp-$i" --quiet
           done
+          # Plain concatenation rather than template literals. The block below is
+          # JavaScript inside single quotes, where a dollar-brace expression reads to
+          # shellcheck as an expansion bash was never going to perform.
           node -e '
             const { readFileSync, writeFileSync } = require("node:fs");
             const path = ".flake-radar/history.json";
             const history = JSON.parse(readFileSync(path, "utf8"));
             const ids = Object.keys(history.quarantine);
-            if (ids.length !== 1) throw new Error(`expected 1 quarantined test, got ${ids.length}`);
+            if (ids.length !== 1) throw new Error("expected 1 quarantined test, got " + ids.length);
             const backdated = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString();
             history.quarantine[ids[0]].since = backdated;
             history.quarantine[ids[0]].issue = 1;
             writeFileSync(path, JSON.stringify(history, null, 2));
-            console.log(`backdated ${ids[0]} to ${backdated}`);
+            console.log("backdated " + ids[0] + " to " + backdated);
           '
 
       - name: 'Sweep: age the quarantine'
