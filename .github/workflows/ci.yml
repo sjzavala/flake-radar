@@ -1,0 +1,213 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Engine unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      # No install step — the engine is dependency-free by design, which is what lets the
+      # action run in any repo without touching its lockfile.
+      - run: node --test 'scripts/**/*.test.mjs'
+
+  lifecycle:
+    name: Action self-test — the full quarantine lifecycle
+    runs-on: ubuntu-latest
+    env:
+      # Both fixtures contain the same three tests: one that flakes on retry, one that
+      # always passes, and one that always fails.
+      FLAKY: examples/reports/flaky-run.json
+      CLEAN: examples/reports/clean-run.json
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      # Two flaky commits is a 100% flake rate — and still not enough to act on. This
+      # asserts the guard that stops one bad afternoon from muting a test for two weeks.
+      - name: 'Commit 1 of 3'
+        uses: ./
+        with:
+          report: ${{ env.FLAKY }}
+          commit-sha: sha-0001
+          run-id: selftest-1
+          manage-issues: 'false'
+
+      - name: 'Commit 2 of 3'
+        id: two
+        uses: ./
+        with:
+          report: ${{ env.FLAKY }}
+          commit-sha: sha-0002
+          run-id: selftest-2
+          manage-issues: 'false'
+
+      - name: Assert two commits is not yet enough
+        env:
+          QUARANTINED: ${{ steps.two.outputs.quarantined-count }}
+        run: |
+          set -euo pipefail
+          [ "$QUARANTINED" = "0" ] || { echo "::error::expected 0 quarantined at 2 commits, got '$QUARANTINED'"; exit 1; }
+          echo "held off at 2 commits, as designed"
+
+      - name: 'Commit 3 of 3'
+        id: three
+        uses: ./
+        with:
+          report: ${{ env.FLAKY }}
+          commit-sha: sha-0003
+          run-id: selftest-3
+          manage-issues: 'false'
+
+      - name: Assert it quarantined the flaky test and nothing else
+        env:
+          QUARANTINED: ${{ steps.three.outputs.quarantined-count }}
+          BROKEN: ${{ steps.three.outputs.broken-count }}
+        run: |
+          set -euo pipefail
+          [ "$QUARANTINED" = "1" ] || { echo "::error::expected 1 quarantined, got '$QUARANTINED'"; exit 1; }
+
+          # The always-failing test must NOT be quarantined. This is the assertion that
+          # matters most: quarantining it would hide a real, reproducible failure behind a
+          # flakiness label.
+          [ "$BROKEN" = "1" ] || { echo "::error::expected 1 consistently-failing test, got '$BROKEN'"; exit 1; }
+
+          held=$(jq -r '.tests[].title' .flake-radar/quarantine.json)
+          [ "$held" = "applies a discount code" ] || { echo "::error::wrong test quarantined: '$held'"; exit 1; }
+          echo "quarantined only the flaky test; the broken one and the healthy one were left alone"
+
+      # Nine clean runs through the engine directly, then the tenth through the action, so
+      # the decisive run is the one the action itself makes.
+      - name: Accumulate nine clean runs
+        run: |
+          set -euo pipefail
+          for i in $(seq 4 12); do
+            node scripts/flake-radar.mjs ingest \
+              --report "$CLEAN" --run-id "selftest-$i" --sha "sha-00$i" --quiet
+          done
+          [ "$(jq '.tests | length' .flake-radar/quarantine.json)" = "1" ] \
+            || { echo "::error::it released the test early"; exit 1; }
+          echo "still quarantined after 9 clean runs, as designed"
+
+      - name: 'Clean run 10 of 10'
+        id: restore
+        uses: ./
+        with:
+          report: ${{ env.CLEAN }}
+          commit-sha: sha-0013
+          run-id: selftest-13
+          manage-issues: 'false'
+
+      - name: Assert it restored the test on its own
+        env:
+          RESTORED: ${{ steps.restore.outputs.restored-count }}
+          ACTIVE: ${{ steps.restore.outputs.active-count }}
+        run: |
+          set -euo pipefail
+          [ "$RESTORED" = "1" ] || { echo "::error::expected 1 restored, got '$RESTORED'"; exit 1; }
+          [ "$ACTIVE" = "0" ] || { echo "::error::expected an empty quarantine, got '$ACTIVE' held"; exit 1; }
+          jq -e '.quarantineLog[0].outcome == "restored"' .flake-radar/history.json > /dev/null
+          echo "restored automatically after 10 consecutive clean runs, with the trail recorded"
+
+      # Expiry is the design decision the whole tool turns on, so it gets asserted rather
+      # than described. Re-quarantine, backdate the clock, and sweep.
+      - name: Re-quarantine and backdate it past the expiry
+        run: |
+          set -euo pipefail
+          for i in 14 15 16; do
+            node scripts/flake-radar.mjs ingest \
+              --report "$FLAKY" --run-id "expiry-$i" --sha "sha-exp-$i" --quiet
+          done
+          node -e '
+            const { readFileSync, writeFileSync } = require("node:fs");
+            const path = ".flake-radar/history.json";
+            const history = JSON.parse(readFileSync(path, "utf8"));
+            const ids = Object.keys(history.quarantine);
+            if (ids.length !== 1) throw new Error(`expected 1 quarantined test, got ${ids.length}`);
+            const backdated = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000).toISOString();
+            history.quarantine[ids[0]].since = backdated;
+            history.quarantine[ids[0]].issue = 1;
+            writeFileSync(path, JSON.stringify(history, null, 2));
+            console.log(`backdated ${ids[0]} to ${backdated}`);
+          '
+
+      - name: 'Sweep: age the quarantine'
+        id: sweep
+        uses: ./
+        with:
+          mode: sweep
+          manage-issues: 'false'
+
+      - name: Assert the expiry escalated
+        env:
+          ESCALATED: ${{ steps.sweep.outputs.escalated-count }}
+          QUARANTINED: ${{ steps.sweep.outputs.quarantined-count }}
+        run: |
+          set -euo pipefail
+          [ "$ESCALATED" = "1" ] || { echo "::error::expected 1 escalation, got '$ESCALATED'"; exit 1; }
+          # A sweep ingests nothing, so it must never be able to quarantine.
+          [ "$QUARANTINED" = "0" ] || { echo "::error::a sweep quarantined something, got '$QUARANTINED'"; exit 1; }
+          jq -e '.quarantine | to_entries[0].value.escalatedAt != null' .flake-radar/history.json > /dev/null
+          echo "escalated at expiry, and stamped so it cannot fire twice"
+
+      - name: 'Sweep again: the escalation must not repeat'
+        id: sweep2
+        uses: ./
+        with:
+          mode: sweep
+          manage-issues: 'false'
+
+      - name: Assert the escalation fired exactly once
+        env:
+          ESCALATED: ${{ steps.sweep2.outputs.escalated-count }}
+        run: |
+          [ "$ESCALATED" = "0" ] || { echo "::error::escalated twice, got '$ESCALATED'"; exit 1; }
+          echo "escalation is idempotent"
+
+  guards:
+    name: Refuses to score what it cannot explain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: A missing results file fails loudly
+        run: |
+          set -euo pipefail
+          if node scripts/flake-radar.mjs ingest --report does-not-exist.json --run-id 1 --sha abc 2>/dev/null; then
+            echo "::error::it accepted a report that does not exist"; exit 1
+          fi
+          echo "refused a missing report"
+
+      - name: A run with no commit SHA is rejected
+        run: |
+          set -euo pipefail
+          # Without a SHA an observation cannot be compared with anything. Admitting it
+          # would corrupt every score computed afterwards, so it must be refused.
+          if node scripts/flake-radar.mjs ingest --report examples/reports/clean-run.json --run-id 1 2>/dev/null; then
+            echo "::error::it accepted results with no commit SHA"; exit 1
+          fi
+          echo "refused results with no commit SHA"
+
+  actionlint:
+    name: Workflow lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color

@@ -1,0 +1,38 @@
+# The expiry sweep.
+#
+# Quarantine is granted by the test run, but it expires on the calendar — and a repo can
+# go quiet for a fortnight. Without this, a quarantine could outlive its deadline simply
+# because nobody pushed, which is the exact failure mode the deadline exists to prevent.
+#
+# Ingests nothing. It only ages what is already held, so it can never quarantine anything
+# new on its own.
+
+name: Flake quarantine expiry
+
+on:
+  schedule:
+    - cron: '0 9 * * 1' # Monday morning, so it lands in front of someone
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: sjzavala/flake-radar@v1
+        id: sweep
+        with:
+          mode: sweep
+          commit: 'true'
+          commit-message: 'chore(flake-radar): age quarantines'
+
+      - name: Report what expired
+        env:
+          ESCALATED: ${{ steps.sweep.outputs.escalated-count }}
+          ACTIVE: ${{ steps.sweep.outputs.active-count }}
+        run: echo "$ACTIVE test(s) in quarantine, $ESCALATED newly past expiry"

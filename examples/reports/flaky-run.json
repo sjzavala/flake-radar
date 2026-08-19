@@ -1,0 +1,71 @@
+{
+  "config": { "version": "1.47.0" },
+  "suites": [
+    {
+      "title": "tests/checkout.spec.js",
+      "file": "tests/checkout.spec.js",
+      "specs": [
+        {
+          "title": "applies a discount code",
+          "file": "tests/checkout.spec.js",
+          "ok": true,
+          "tests": [
+            {
+              "projectName": "chromium",
+              "status": "flaky",
+              "results": [
+                {
+                  "status": "failed",
+                  "duration": 5012,
+                  "retry": 0,
+                  "error": {
+                    "message": "Timed out 5000ms waiting for expect(locator).toBeVisible()\n\nLocator: getByRole('alert')\nExpected: visible\nReceived: hidden"
+                  }
+                },
+                { "status": "passed", "duration": 812, "retry": 1 }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "shows the order total",
+          "file": "tests/checkout.spec.js",
+          "ok": true,
+          "tests": [
+            {
+              "projectName": "chromium",
+              "status": "expected",
+              "results": [{ "status": "passed", "duration": 640, "retry": 0 }]
+            }
+          ]
+        },
+        {
+          "title": "emails a receipt",
+          "file": "tests/checkout.spec.js",
+          "ok": false,
+          "tests": [
+            {
+              "projectName": "chromium",
+              "status": "unexpected",
+              "results": [
+                {
+                  "status": "failed",
+                  "duration": 301,
+                  "retry": 0,
+                  "error": { "message": "expected 1 email, received 0" }
+                },
+                {
+                  "status": "failed",
+                  "duration": 294,
+                  "retry": 1,
+                  "error": { "message": "expected 1 email, received 0" }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": []
+}

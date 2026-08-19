@@ -1,0 +1,61 @@
+{
+  "config": { "version": "1.47.0" },
+  "suites": [
+    {
+      "title": "tests/checkout.spec.js",
+      "file": "tests/checkout.spec.js",
+      "specs": [
+        {
+          "title": "applies a discount code",
+          "file": "tests/checkout.spec.js",
+          "ok": true,
+          "tests": [
+            {
+              "projectName": "chromium",
+              "status": "expected",
+              "results": [{ "status": "passed", "duration": 794, "retry": 0 }]
+            }
+          ]
+        },
+        {
+          "title": "shows the order total",
+          "file": "tests/checkout.spec.js",
+          "ok": true,
+          "tests": [
+            {
+              "projectName": "chromium",
+              "status": "expected",
+              "results": [{ "status": "passed", "duration": 651, "retry": 0 }]
+            }
+          ]
+        },
+        {
+          "title": "emails a receipt",
+          "file": "tests/checkout.spec.js",
+          "ok": false,
+          "tests": [
+            {
+              "projectName": "chromium",
+              "status": "unexpected",
+              "results": [
+                {
+                  "status": "failed",
+                  "duration": 298,
+                  "retry": 0,
+                  "error": { "message": "expected 1 email, received 0" }
+                },
+                {
+                  "status": "failed",
+                  "duration": 288,
+                  "retry": 1,
+                  "error": { "message": "expected 1 email, received 0" }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": []
+}

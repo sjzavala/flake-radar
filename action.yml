@@ -1,0 +1,308 @@
+name: 'Flake Radar'
+description: >-
+  Score test flakiness from same-commit evidence, quarantine the worst offenders with the
+  evidence attached, restore them automatically once they are clean, and escalate any
+  quarantine that outlives its expiry.
+author: 'Seve Zavala'
+
+branding:
+  icon: 'radio'
+  color: 'purple'
+
+inputs:
+  mode:
+    description: >-
+      "ingest" folds a results file into the history and decides. "sweep" ingests nothing
+      and only ages existing quarantines, for a scheduled expiry check.
+    required: false
+    default: 'ingest'
+  report:
+    description: >-
+      Path to the results file. Playwright JSON reporter output is preferred; JUnit XML
+      works but discards retry attempts, which is the strongest evidence available.
+      Required in ingest mode.
+    required: false
+    default: ''
+  commit-sha:
+    description: >-
+      Commit the results belong to. Defaults to the pull request head SHA, or `github.sha`
+      on a push. Override it when replaying archived reports.
+    required: false
+    default: ''
+  run-id:
+    description: >-
+      Identifier for this execution. Defaults to `github.run_id`. Two ingests sharing an id
+      and attempt are treated as the same run, so replaying a batch needs distinct values.
+    required: false
+    default: ''
+  history:
+    description: 'Path to the committed history file.'
+    required: false
+    default: '.flake-radar/history.json'
+  quarantine-file:
+    description: 'Path to the quarantine list the test run consumes.'
+    required: false
+    default: '.flake-radar/quarantine.json'
+  config:
+    description: 'Path to a JSON config (threshold / minShas / restoreAfter / expiryDays / window).'
+    required: false
+    default: '.flake-radar/config.json'
+  threshold:
+    description: 'Flake score at which a test is quarantined. Overrides the config file.'
+    required: false
+    default: ''
+  min-shas:
+    description: 'Distinct commits required before any quarantine decision.'
+    required: false
+    default: ''
+  restore-after:
+    description: 'Consecutive clean runs that earn a release.'
+    required: false
+    default: ''
+  expiry-days:
+    description: 'Days after which a quarantine escalates to a blocking issue.'
+    required: false
+    default: ''
+  window:
+    description: 'Runs retained in the history file.'
+    required: false
+    default: ''
+  manage-issues:
+    description: >-
+      Open an issue per new quarantine, close it on restore, and escalate it on expiry.
+      Needs `issues: write`.
+    required: false
+    default: 'true'
+  comment:
+    description: 'Post the summary as a pull request comment. Needs `pull-requests: write`.'
+    required: false
+    default: 'false'
+  commit:
+    description: >-
+      Commit the updated history and quarantine list back to the branch. Enable this on
+      the trunk build only — see the README on why pull requests should not write to
+      shared history.
+    required: false
+    default: 'false'
+  commit-message:
+    description: 'Commit message used when `commit` is enabled.'
+    required: false
+    default: 'chore(flake-radar): update flake history'
+  github-token:
+    description: 'Token used for issues, comments and the push.'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  quarantined-count:
+    description: 'Tests quarantined by this run.'
+    value: ${{ steps.engine.outputs.quarantined-count }}
+  restored-count:
+    description: 'Tests released from quarantine by this run.'
+    value: ${{ steps.engine.outputs.restored-count }}
+  escalated-count:
+    description: 'Quarantines that passed their expiry on this run.'
+    value: ${{ steps.engine.outputs.escalated-count }}
+  active-count:
+    description: 'Tests currently in quarantine.'
+    value: ${{ steps.engine.outputs.active-count }}
+  broken-count:
+    description: 'Tests that never pass — deterministically failing, deliberately not quarantined.'
+    value: ${{ steps.engine.outputs.broken-count }}
+  changed:
+    description: '"true" when this run quarantined, restored or escalated anything.'
+    value: ${{ steps.engine.outputs.changed }}
+  grep-invert:
+    description: >-
+      A regex matching the quarantined test titles. Only useful if you intend to skip them
+      outright — which stops them producing the clean runs that would release them.
+    value: ${{ steps.engine.outputs.grep-invert }}
+  summary:
+    description: 'Path to the markdown summary.'
+    value: ${{ steps.engine.outputs.summary-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Score and decide
+      id: engine
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        REPORT: ${{ inputs.report }}
+        HISTORY: ${{ inputs.history }}
+        QUARANTINE: ${{ inputs.quarantine-file }}
+        CONFIG: ${{ inputs.config }}
+        THRESHOLD: ${{ inputs.threshold }}
+        MIN_SHAS: ${{ inputs.min-shas }}
+        RESTORE_AFTER: ${{ inputs.restore-after }}
+        EXPIRY_DAYS: ${{ inputs.expiry-days }}
+        WINDOW: ${{ inputs.window }}
+        SUMMARY: ${{ runner.temp }}/flake-radar/summary.md
+        ACTIONS: ${{ runner.temp }}/flake-radar/actions.ndjson
+        DECISIONS: ${{ runner.temp }}/flake-radar/decisions.json
+        SERVER: ${{ github.server_url }}
+        REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+        SHA: ${{ inputs.commit-sha || github.event.pull_request.head.sha || github.sha }}
+        RUN_ID_OVERRIDE: ${{ inputs.run-id }}
+        REF_NAME: ${{ github.ref_name }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$(dirname "$SUMMARY")"
+
+        args=(
+          --history "$HISTORY"
+          --quarantine "$QUARANTINE"
+          --config "$CONFIG"
+          --out-comment "$SUMMARY"
+          --out-actions "$ACTIONS"
+          --out-decisions "$DECISIONS"
+          --run-url "$SERVER/$REPO/actions/runs/$RUN_ID"
+          --quiet
+        )
+        # `if` rather than `[ ... ] && ...`: under `set -e` a false test as the last command
+        # of an && list exits the step, which would make every unset override fatal.
+        if [ -n "$THRESHOLD" ]; then args+=(--threshold "$THRESHOLD"); fi
+        if [ -n "$MIN_SHAS" ]; then args+=(--min-shas "$MIN_SHAS"); fi
+        if [ -n "$RESTORE_AFTER" ]; then args+=(--restore-after "$RESTORE_AFTER"); fi
+        if [ -n "$EXPIRY_DAYS" ]; then args+=(--expiry-days "$EXPIRY_DAYS"); fi
+        if [ -n "$WINDOW" ]; then args+=(--window "$WINDOW"); fi
+
+        if [ "$MODE" = "sweep" ]; then
+          node "$GITHUB_ACTION_PATH/scripts/flake-radar.mjs" report "${args[@]}"
+        else
+          if [ -z "$REPORT" ]; then
+            echo "::error::flake-radar: the 'report' input is required in ingest mode."
+            exit 1
+          fi
+          if [ ! -f "$REPORT" ]; then
+            # A missing report almost always means the test job failed before writing one.
+            # Say so and stop, rather than scoring a run that never happened.
+            echo "::error::flake-radar: no results file at '$REPORT'. Did the test job produce one?"
+            exit 1
+          fi
+          # The PR head SHA, not the synthetic merge commit: the merge commit is unique per
+          # push, so scoring against it would make every observation a different commit and
+          # no same-SHA comparison would ever be possible.
+          node "$GITHUB_ACTION_PATH/scripts/flake-radar.mjs" ingest \
+            --report "$REPORT" \
+            --run-id "${RUN_ID_OVERRIDE:-$RUN_ID}" \
+            --run-attempt "$RUN_ATTEMPT" \
+            --sha "$SHA" \
+            --branch "$REF_NAME" \
+            "${args[@]}"
+        fi
+
+        {
+          echo "summary-path=$SUMMARY"
+          echo "actions-path=$ACTIONS"
+          echo "decisions-path=$DECISIONS"
+        } >> "$GITHUB_OUTPUT"
+
+        cat "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+        cat "$SUMMARY"
+
+    - name: Open, close and escalate issues
+      if: ${{ inputs.manage-issues == 'true' && steps.engine.outputs.changed == 'true' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        HISTORY: ${{ inputs.history }}
+        QUARANTINE: ${{ inputs.quarantine-file }}
+        ACTIONS: ${{ steps.engine.outputs.actions-path }}
+      run: |
+        set -euo pipefail
+        [ -s "$ACTIONS" ] || exit 0
+
+        # Make sure the labels exist before any issue references them. `gh issue create`
+        # rejects an unknown label outright, and discovering that mid-loop would leave
+        # some quarantines filed and others silently not.
+        gh label create 'flake-radar' --repo "$REPO" --color 'BFD4F2' \
+          --description 'Opened by Flake Radar' 2>/dev/null || true
+        gh label create 'flaky-test' --repo "$REPO" --color 'FBCA04' \
+          --description 'Quarantined for flakiness' 2>/dev/null || true
+        gh label create 'flake-radar:expired' --repo "$REPO" --color 'B60205' \
+          --description 'Quarantine outlived its expiry' 2>/dev/null || true
+
+        # jq is preinstalled on GitHub-hosted runners. The engine itself stays
+        # dependency-free; only this glue reads its output.
+        while IFS= read -r line; do
+          [ -n "$line" ] || continue
+          kind=$(jq -r '.action' <<<"$line")
+          body=$(jq -r '.bodyFile' <<<"$line")
+          test_id=$(jq -r '.testId' <<<"$line")
+
+          case "$kind" in
+            open-issue)
+              title=$(jq -r '.title' <<<"$line")
+              labels=$(jq -r '.labels | join(",")' <<<"$line")
+              url=$(gh issue create --repo "$REPO" --title "$title" --body-file "$body" --label "$labels" 2>/dev/null \
+                || gh issue create --repo "$REPO" --title "$title" --body-file "$body")
+              number="${url##*/}"
+              echo "quarantined $test_id -> issue #$number"
+              # Write the number back so a later restore knows which issue to close.
+              node "$GITHUB_ACTION_PATH/scripts/flake-radar.mjs" link-issue \
+                --history "$HISTORY" --quarantine "$QUARANTINE" --test "$test_id" --issue "$number"
+              ;;
+            close-issue)
+              number=$(jq -r '.issue' <<<"$line")
+              gh issue comment "$number" --repo "$REPO" --body-file "$body"
+              gh issue close "$number" --repo "$REPO" --reason completed
+              echo "restored $test_id -> closed issue #$number"
+              ;;
+            escalate-issue)
+              number=$(jq -r '.issue' <<<"$line")
+              labels=$(jq -r '.labels | join(",")' <<<"$line")
+              gh issue comment "$number" --repo "$REPO" --body-file "$body"
+              gh issue edit "$number" --repo "$REPO" --add-label "$labels" || true
+              echo "::warning::flake-radar: quarantine expired for $test_id (issue #$number)"
+              ;;
+          esac
+        done < "$ACTIONS"
+
+    - name: Commit the updated history
+      if: ${{ inputs.commit == 'true' }}
+      shell: bash
+      env:
+        HISTORY: ${{ inputs.history }}
+        QUARANTINE: ${{ inputs.quarantine-file }}
+        MESSAGE: ${{ inputs.commit-message }}
+        BRANCH: ${{ github.ref_name }}
+      run: |
+        set -euo pipefail
+        git config user.name 'github-actions[bot]'
+        git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+        git add -- "$HISTORY" "$QUARANTINE"
+        if git diff --staged --quiet; then
+          echo "no history change to commit"
+          exit 0
+        fi
+        git commit -m "$MESSAGE"
+        # `HEAD:refs/heads/$BRANCH` rather than a bare push: actions/checkout leaves a push
+        # build on a detached HEAD, where a bare `git push` has no upstream to target.
+        #
+        # Another build may have landed while this one was scoring, so rebase and retry
+        # once rather than failing the job over a race in a bookkeeping file.
+        git push origin "HEAD:refs/heads/$BRANCH" || {
+          git fetch origin "$BRANCH"
+          git rebase "origin/$BRANCH"
+          git push origin "HEAD:refs/heads/$BRANCH"
+        }
+
+    - name: Comment the summary
+      if: ${{ inputs.comment == 'true' && github.event.pull_request.number }}
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        SUMMARY: ${{ steps.engine.outputs.summary-path }}
+      run: |
+        [ -f "$SUMMARY" ] || exit 0
+        # One rolling comment per PR rather than one per push.
+        gh pr comment "$PR" --repo "$REPO" --body-file "$SUMMARY" --edit-last --create-if-none \
+          || gh pr comment "$PR" --repo "$REPO" --body-file "$SUMMARY"

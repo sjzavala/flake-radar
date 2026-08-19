@@ -1,0 +1,7 @@
+node_modules/
+.DS_Store
+*.log
+
+# The self-test writes a history here. In a *consuming* repo this directory is the
+# opposite — it is committed on purpose, so the tool's decisions show up in a diff.
+.flake-radar/

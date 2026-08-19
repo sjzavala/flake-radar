@@ -1,0 +1,129 @@
+# The recommended setup: two test jobs and one radar.
+#
+# The blocking job runs everything except the quarantined tests. The non-blocking job runs
+# *only* the quarantined ones and is allowed to fail. Both feed the same history.
+#
+# That second job is the part people skip, and it is the part that makes the whole thing
+# work. A quarantined test that stops running can never produce the clean runs that would
+# release it, so quarantine becomes permanent — the graveyard this tool exists to avoid.
+# Keeping it running, off the critical path, is what turns muting into a loan.
+
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quarantine-list:
+    name: Read the quarantine list
+    runs-on: ubuntu-latest
+    outputs:
+      pattern: ${{ steps.read.outputs.pattern }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: read
+        run: |
+          set -euo pipefail
+          pattern=''
+          if [ -f .flake-radar/quarantine.json ]; then
+            pattern=$(jq -r '[.tests[].title] | join("|")' .flake-radar/quarantine.json)
+          fi
+          echo "pattern=$pattern" >> "$GITHUB_OUTPUT"
+          echo "quarantined: ${pattern:-none}"
+
+  blocking:
+    name: Tests (blocking)
+    needs: quarantine-list
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Run everything except the quarantined tests
+        env:
+          QUARANTINED: ${{ needs.quarantine-list.outputs.pattern }}
+        run: |
+          set -euo pipefail
+          if [ -n "$QUARANTINED" ]; then
+            npx playwright test --reporter=json --grep-invert "$QUARANTINED" > report.json
+          else
+            npx playwright test --reporter=json > report.json
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-blocking
+          path: report.json
+
+  quarantined:
+    name: Tests (quarantined, non-blocking)
+    needs: quarantine-list
+    if: ${{ needs.quarantine-list.outputs.pattern != '' }}
+    runs-on: ubuntu-latest
+    # The whole point: these failures must not gate the merge, but they must still be seen.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Run only the quarantined tests
+        env:
+          QUARANTINED: ${{ needs.quarantine-list.outputs.pattern }}
+        run: npx playwright test --reporter=json --grep "$QUARANTINED" > report.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-quarantined
+          path: report.json
+
+  radar:
+    name: Flake Radar
+    needs: [blocking, quarantined]
+    # Runs even when the blocking job failed — a failing run is exactly the run whose
+    # results are worth scoring.
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # only needed for `commit: true`
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: results-*
+          path: results
+          merge-multiple: false
+
+      # Each job's report is ingested separately, under its own run id, so the two never
+      # overwrite one another in the history.
+      - uses: sjzavala/flake-radar@v1
+        if: ${{ hashFiles('results/results-blocking/report.json') != '' }}
+        with:
+          report: results/results-blocking/report.json
+          run-id: ${{ github.run_id }}-blocking
+          comment: 'true'
+          commit: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: sjzavala/flake-radar@v1
+        if: ${{ hashFiles('results/results-quarantined/report.json') != '' }}
+        with:
+          report: results/results-quarantined/report.json
+          run-id: ${{ github.run_id }}-quarantined
+          commit: ${{ github.ref == 'refs/heads/main' }}
