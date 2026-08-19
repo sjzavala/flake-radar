@@ -131,8 +131,8 @@ jobs:
               --report "$FLAKY" --run-id "expiry-$i" --sha "sha-exp-$i" --quiet
           done
           # Plain concatenation rather than template literals. The block below is
-          # JavaScript inside single quotes, where a dollar-brace expression reads to
-          # shellcheck as an expansion bash was never going to perform.
+          # JavaScript inside single quotes, and a dollar-brace expression in there looks
+          # to a shell linter like an expansion bash was never going to perform.
           node -e '
             const { readFileSync, writeFileSync } = require("node:fs");
             const path = ".flake-radar/history.json";
